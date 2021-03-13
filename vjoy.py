@@ -1,32 +1,84 @@
 import aiohttp
 import asyncio
+import math
 import pyvjoy
 import requests
 import time
+import traceback
+
+class PIDController:
+    def __init__(self, p, i, d):
+        # initialize controller parameters
+        self.p = p
+        self.i = i
+        self.d = d
+
+        # initialize controller state
+        self.last_t = time.time()
+        self.last_e = 0
+        self.tot_e = 0
+
+    def update(self, e):
+        # get current time
+        t = time.time()
+
+        # update integral term
+        self.tot_e += e * (t - self.last_t)
+
+        # calculate controller output
+        u = self.p * e + self.i * self.tot_e + self.d * (e - self.last_e) / (t - self.last_t)
+
+        # remember time and error
+        self.last_t = t
+        self.last_e = e
+        return u
 
 # set_elevator, set_aileron, set_rudder expect float input in [-1, 1]
 def set_elevator(j, v):
+    v = min(1, max(-1, v))
     j.set_axis(pyvjoy.HID_USAGE_X, int((v + 1) * 0x4000))
 
 def set_aileron(j, v):
+    v = min(1, max(-1, v))
     j.set_axis(pyvjoy.HID_USAGE_Y, int((v + 1) * 0x4000))
 
 def set_rudder(j, v):
+    v = min(1, max(-1, v))
     j.set_axis(pyvjoy.HID_USAGE_RZ, int((v + 1) * 0x4000))
 
 # set_throttle expects float input in [0, 1]
 def set_throttle(j, v):
+    v = min(1, max(0, v))
     j.set_axis(pyvjoy.HID_USAGE_Z, int(v * 0x8000))
 
 # aircraft control model
 # construct with map info
 # takes updates via update_state, update_indicators, update_map
 class AircraftController:
-    def __init__(self, map_info):
+    def __init__(self, joystick, map_info):
+        self.joystick = joystick
+
         self.min_x = map_info['map_min'][0]
         self.min_y = map_info['map_min'][1]
         self.max_x = map_info['map_max'][0]
         self.max_y = map_info['map_max'][1]
+
+        self.pitch_controller = PIDController(0.04, 0, 0.02)
+        self.roll_controller = PIDController(0.04, 0.01, 0.02)
+        self.yaw_controller = PIDController(0.04, 0.01, 0.02)
+
+        self.alpha = 0
+        self.beta = 0
+        self.Vy = 0
+        self.Wx = 0
+        self.speed = 0
+        self.altitude = 0
+        self.roll = 0
+        self.pitch = 0
+        self.compass = 0
+
+        self.init_time = time.time()
+        self.state = 0
 
     def update_state(self, state):
         self.alpha = state['AoA, deg']
@@ -35,11 +87,12 @@ class AircraftController:
         self.Wx = state['Wx, deg/s']
 
     def update_indicators(self, indicators):
-        self.speed = indicators['speed'] # unknown
+        self.speed = indicators['speed'] # m/s
         self.altitude = indicators['altitude_10k'] # feet
         self.roll = indicators['aviahorizon_roll']
         self.pitch = indicators['aviahorizon_pitch']
-        self.hdg = indicators['compass']
+        self.compass = indicators['compass']
+        self.get_control()
 
     def update_map(self, map_obj):
         for e in map_obj:
@@ -48,68 +101,91 @@ class AircraftController:
                 self.y = self.min_x + (self.max_x - self.min_x) * e['x']
 
     def get_control(self):
-        return (0, 0, 0, 0)
+        if time.time() - self.init_time < 5:
+            control = (0, 0, 0, 0)
+        elif self.speed < 1:
+            control = (0, 0, 0, 0.9)
+        elif self.speed < 50:
+            elevator = self.pitch_controller.update(-self.alpha)
+            aileron = self.roll_controller.update(self.roll)
+            rudder = self.yaw_controller.update((225 - self.compass + 180) % 360 - 180)
+            control = (elevator, aileron * 50 / self.speed, rudder * 10 / self.speed, 0.9)
+        else:
+            if self.state == 0:
+                self.pitch_controller = PIDController(0.05, 0.01, 0.01)
+                self.state = 1
+            elevator = self.pitch_controller.update(7 - self.alpha)
+            aileron = self.roll_controller.update(self.roll)
+            rudder = self.yaw_controller.update((225 - self.compass + 180) % 360 - 180)
+            control = (elevator, aileron * 50 / self.speed, rudder * 10 / self.speed, 0.9)
+
+        print(control)
+        set_elevator(self.joystick, control[0])
+        set_aileron(self.joystick, control[1])
+        set_rudder(self.joystick, control[2])
+        set_throttle(self.joystick, control[3])
 
 async def poll_state(session, controller):
     while True:
         try:
-            state = await session.get('http://localhost:8111/state', timeout=0.01)
-            controller.update_state(state.json())
+            state = await session.get('http://localhost:8111/state', timeout=0.05)
+            controller.update_state(await state.json())
         except:
             pass
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
 
 async def poll_indicators(session, controller):
     while True:
         try:
-            indicators = await session.get('http://localhost:8111/indicators', timeout=0.01)
-            controller.update_indicators(indicators.json())
+            indicators = await session.get('http://localhost:8111/indicators', timeout=0.05)
+            controller.update_indicators(await indicators.json())
         except:
-            pass
-        await asyncio.sleep(0.02)
+            traceback.print_exc()
+        await asyncio.sleep(0.2)
 
 async def poll_map(session, controller):
     while True:
         try:
-            map_obj = await session.get('http://localhost:8111/map_obj.json', timeout=0.01)
-            controller.update_map(map_obj.json())
+            map_obj = await session.get('http://localhost:8111/map_obj.json', timeout=0.05)
+            controller.update_map(await map_obj.json())
         except:
             pass
-        await asyncio.sleep(0.02)
-
-async def update_joystick(controller, joystick):
-    while True:
-        control = controller.get_control()
-        set_elevator(joystick, control[0])
-        set_aileron(joystick, control[1])
-        set_rudder(joystick, control[2])
-        set_throttle(joystick, control[3])
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
 
 def main():
     # main loop: asynchronously:
     # 1. periodically fetch data from WT and update the controller,
     # 2. periodically request joystick outputs from controller
 
-    print("[INFO] fetching map info")
+    print('[INFO] fetching map info')
     while True:
         try:
             map_info = requests.get('http://localhost:8111/map_info.json', timeout=0.01).json()
             break
+        except KeyboardInterrupt:
+            exit(0)
         except:
             pass
     
-    print("[INFO] initializing main loop")
-    controller = AircraftController(map_info)
-    session = aiohttp.ClientSession()
+    print('[INFO] initializing main loop')
     joystick = pyvjoy.VJoyDevice(1)
+    controller = AircraftController(joystick, map_info)
+    session = aiohttp.ClientSession()
 
     loop = asyncio.get_event_loop()
     loop.create_task(poll_state(session, controller))
     loop.create_task(poll_indicators(session, controller))
     loop.create_task(poll_map(session, controller))
-    loop.create_task(update_joystick(controller, joystick))
-    loop.run_forever()
+    try:
+        loop.run_forever()
+    except:
+        print('[INFO] cleaning up')
+        loop.stop()
+        set_elevator(joystick, 0)
+        set_aileron(joystick, 0)
+        set_rudder(joystick, 0)
+        set_throttle(joystick, 0)
+        joystick.update()
 
 if __name__ == '__main__':
     main()
