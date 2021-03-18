@@ -6,7 +6,7 @@ import requests
 import time
 import traceback
 
-from pid import PID
+from util import PID, Estimator
 
 # aircraft control model
 # construct with map info
@@ -42,16 +42,12 @@ class Controller:
         self.map_count = 0
 
     def update_state(self, state):
-        #print('[DEBUG] %f got state' % time.time())
-        self.state_count += 1
         self.alpha = state['AoA, deg']
         self.beta = state['AoS, deg']
         self.Vy = state['Vy, m/s']
         self.Wx = state['Wx, deg/s']
 
     def update_indicators(self, indicators):
-        #print('[DEBUG] %f got indicators' % time.time())
-        self.indicator_count += 1
         self.speed = indicators['speed'] # m/s
         self.altitude = indicators['altitude_10k'] # feet
         self.roll = indicators['aviahorizon_roll']
@@ -60,8 +56,6 @@ class Controller:
         self.get_control()
 
     def update_map(self, map_obj):
-        #print('[DEBUG] %f got map_obj' % time.time())
-        self.map_count += 1
         for e in map_obj:
             if e['icon'] == 'Player':
                 self.x = self.min_y + (self.max_y - self.min_y) * e['y']
@@ -110,51 +104,63 @@ def set_throttle(j, v):
     v = min(1, max(0, v))
     j.set_axis(pyvjoy.HID_USAGE_Z, int(v * 0x8000))
 
-async def poll_state(controller):
-    session = aiohttp.ClientSession()
-    while True:
-        try:
-            state = await session.get(
-                'http://localhost:8111/state',
-                timeout=0.05)
-            controller.update_state(await state.json())
-        except:
-            pass
+class Poller:
+    def __init__(self, controller):
+        self.state_count = 0
+        self.indicator_count = 0
+        self.map_count = 0
+        self.controller = controller
 
-async def poll_indicators(controller):
-    session = aiohttp.ClientSession()
-    while True:
-        try:
-            indicators = await session.get(
-                'http://localhost:8111/indicators',
-                timeout=0.05)
-            controller.update_indicators(await indicators.json())
-        except:
-            pass
+    async def poll_state(self):
+        session = aiohttp.ClientSession()
+        while True:
+            try:
+                state = await session.get(
+                    'http://localhost:8111/state',
+                    timeout=0.05)
+                self.state_count += 1
+                self.controller.update_state(await state.json())
+            except:
+                pass
 
-async def poll_map(controller):
-    session = aiohttp.ClientSession()
-    while True:
-        try:
-            map_obj = await session.get(
-                'http://localhost:8111/map_obj.json',
-                timeout=0.05)
-            controller.update_map(await map_obj.json())
-        except:
-            pass
+    async def poll_indicators(self):
+        session = aiohttp.ClientSession()
+        while True:
+            try:
+                indicators = await session.get(
+                    'http://localhost:8111/indicators',
+                    timeout=0.05)
+                self.indicator_count += 1
+                self.controller.update_indicators(await indicators.json())
+            except:
+                pass
 
-async def poll_controller(controller):
-    last_time = time.time()
-    while True:
-        await asyncio.sleep(1)
-        t = time.time()
-        print('in last %f seconds, got %d state %d indicators %d map' % \
-            (t - last_time, controller.state_count, \
-            controller.indicator_count, controller.map_count))
-        controller.state_count = 0
-        controller.indicator_count = 0
-        controller.map_count = 0
-        last_time = t
+    async def poll_map(self):
+        session = aiohttp.ClientSession()
+        while True:
+            try:
+                map_obj = await session.get(
+                    'http://localhost:8111/map_obj.json',
+                    timeout=0.05)
+                self.map_count += 1
+                self.controller.update_map(await map_obj.json())
+            except:
+                pass
+
+    async def print_counts(self):
+        last_time = time.time()
+        while True:
+            await asyncio.sleep(1)
+            t = time.time()
+            print('in last %f seconds, got %d state %d indicators %d map' % \
+                (t - last_time,
+                self.state_count, \
+                self.indicator_count, \
+                self.map_count))
+            self.state_count = 0
+            self.indicator_count = 0
+            self.map_count = 0
+            last_time = t
 
 def main():
     # main loop: asynchronously:
@@ -173,15 +179,17 @@ def main():
         except:
             pass
 
-    print('[INFO] initializing main loop')
+    # initialize objects
     joystick = pyvjoy.VJoyDevice(1)
     controller = Controller(joystick, map_info)
+    poller = Poller(controller)
 
+    print('[INFO] initializing main loop')
     loop = asyncio.get_event_loop()
-    loop.create_task(poll_state(controller))
-    loop.create_task(poll_indicators(controller))
-    loop.create_task(poll_map(controller))
-    loop.create_task(poll_controller(controller))
+    loop.create_task(poller.poll_state())
+    loop.create_task(poller.poll_indicators())
+    loop.create_task(poller.poll_map())
+    loop.create_task(poller.print_counts())
     try:
         loop.run_forever()
     except:

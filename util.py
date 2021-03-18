@@ -1,5 +1,7 @@
 import time
 
+# a simple PID controller with optional integral windup mitigation
+# TODO bumpless parameter changing
 class PID:
     def __init__(self, p, i, d, anti_windup=None):
         # initialize controller parameters
@@ -27,6 +29,7 @@ class PID:
         d_term = self.d * (e - self.last_e) / (t - self.last_t)
         self.u = p_term + i_term + d_term
 
+        # back-calculate integral term for anti-windup
         if self.anti_windup and self.u >= self.anti_windup[0]:
             self.u = self.anti_windup[0]
             if self.i != 0:
@@ -40,3 +43,7 @@ class PID:
         self.last_t = t
         self.last_e = e
         return self.u
+
+class Estimator:
+    def __init__(self):
+        pass
