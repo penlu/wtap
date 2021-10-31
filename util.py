@@ -1,3 +1,4 @@
+import numpy
 import time
 
 # a simple PID controller with optional integral windup mitigation
@@ -21,6 +22,7 @@ class PID:
         t = time.time()
 
         # update integral term
+        # TODO simpson's rule
         self.tot_e += e * (t - self.last_t)
 
         # calculate controller output
@@ -44,6 +46,29 @@ class PID:
         self.last_e = e
         return self.u
 
+    def set_params(self, p, i, d):
+        self.p = p
+        self.i = i
+        self.d = d
+
+# estimate current aircraft state from discrete updates
+# TODO linear propagation?
 class Estimator:
     def __init__(self):
+        self.last_x = (0, 0, 0)
+        self.x = (0, 0, 0)
+        self.v = (0, 0, 0)
+        self.last_r = numpy.zeros(3, 3)
+        self.r = numpy.zeros(3, 3)
+        self.w = numpy.zeros(3, 3)
+
+    def update_state(self, state):
+        # TODO infer velocity vector
+        pass
+
+    def update_indicators(self, indicators):
+        # TODO calculate rotation matrix from indicators
+        pass
+
+    def update_map(self, map_obj):
         pass

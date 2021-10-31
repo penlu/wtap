@@ -37,10 +37,6 @@ class Controller:
         self.init_time = time.time()
         self.state = 0
 
-        self.state_count = 0
-        self.indicator_count = 0
-        self.map_count = 0
-
     def update_state(self, state):
         self.alpha = state['AoA, deg']
         self.beta = state['AoS, deg']
@@ -73,7 +69,7 @@ class Controller:
             control = (elevator, aileron * 50 / self.speed, rudder * 10 / self.speed, 0.9)
         else:
             if self.state == 0:
-                self.pitch_pid = PID(0.05, 0.01, 0.01, anti_windup=(-1, 1))
+                self.pitch_pid.set_params(0.05, 0.01, 0.01)
                 self.state = 1
             elevator = self.pitch_pid.update(7 - self.alpha)
             aileron = self.roll_pid.update(self.roll)
